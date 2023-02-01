@@ -79,6 +79,7 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         username: Optional[str] = None,
         password: Optional[str] = None,
         additional_headers: Optional[Dict[str, Any]] = None,
+        scope: Optional[str] = "offline_access",
         index: str = "Document",
         embedding_dim: int = 768,
         content_field: str = "content",
@@ -101,6 +102,7 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         :param username: username (standard authentication via http_auth)
         :param password: password (standard authentication via http_auth)
         :param additional_headers: additional headers to be included in the requests sent to Weaviate e.g. bearer token
+        :param scope: scope of the credentials when using the OIDC Resource Owner Password or Client Credentials authentication flow
         :param index: Index name for document text, embedding and metadata (in Weaviate terminology, this is a "Class" in Weaviate schema).
         :param embedding_dim: The embedding vector size. Default: 768.
         :param content_field: Name of field that might contain the answer and will therefore be passed to the Reader Model (e.g. "full_text").
@@ -135,7 +137,7 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         # Connect to Weaviate server using python binding
         weaviate_url = f"{host}:{port}"
         if username and password:
-            secret = AuthClientPassword(username, password)
+            secret = AuthClientPassword(username, password, scope=scope)
             self.weaviate_client = client.Client(
                 url=weaviate_url,
                 auth_client_secret=secret,
