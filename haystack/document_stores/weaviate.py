@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 try:
     import weaviate
-    from weaviate import client, AuthClientPassword, gql
+    from weaviate import client, AuthClientPassword, gql, AuthClientCredentials
 except (ImportError, ModuleNotFoundError) as ie:
     from haystack.utils.import_utils import _optional_component_not_installed
 
@@ -79,6 +79,7 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         username: Optional[str] = None,
         password: Optional[str] = None,
         additional_headers: Optional[Dict[str, Any]] = None,
+        client_secret: Optional[str] = None,
         scope: Optional[str] = "offline_access",
         index: str = "Document",
         embedding_dim: int = 768,
@@ -102,6 +103,7 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         :param username: username (standard authentication via http_auth)
         :param password: password (standard authentication via http_auth)
         :param additional_headers: additional headers to be included in the requests sent to Weaviate e.g. bearer token
+        :param client_secret: client secret to use when using the OIDC Client Credentials authentication flow
         :param scope: scope of the credentials when using the OIDC Resource Owner Password or Client Credentials authentication flow
         :param index: Index name for document text, embedding and metadata (in Weaviate terminology, this is a "Class" in Weaviate schema).
         :param embedding_dim: The embedding vector size. Default: 768.
@@ -143,6 +145,11 @@ class WeaviateDocumentStore(KeywordDocumentStore):
                 auth_client_secret=secret,
                 timeout_config=timeout_config,
                 additional_headers=additional_headers,
+            )
+        elif client_secret:
+            secret = AuthClientCredentials(client_secret, scope=scope)
+            self.weaviate_client = client.Client(
+                url=weaviate_url, auth_client_secret=secret, timeout_config=timeout_config
             )
         else:
             self.weaviate_client = client.Client(
