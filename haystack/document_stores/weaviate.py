@@ -11,7 +11,7 @@ from tqdm.auto import tqdm
 
 try:
     import weaviate
-    from weaviate import client, AuthClientPassword, gql, AuthClientCredentials
+    from weaviate import client, AuthClientPassword, gql, AuthClientCredentials, AuthBearerToken
 except (ImportError, ModuleNotFoundError) as ie:
     from haystack.utils.import_utils import _optional_component_not_installed
 
@@ -81,6 +81,9 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         additional_headers: Optional[Dict[str, Any]] = None,
         client_secret: Optional[str] = None,
         scope: Optional[str] = "offline_access",
+        access_token: Optional[str] = None,
+        expires_in: Optional[int] = 60,
+        refresh_token: Optional[str] = None,
         index: str = "Document",
         embedding_dim: int = 768,
         content_field: str = "content",
@@ -105,6 +108,9 @@ class WeaviateDocumentStore(KeywordDocumentStore):
         :param additional_headers: additional headers to be included in the requests sent to Weaviate e.g. bearer token
         :param client_secret: client secret to use when using the OIDC Client Credentials authentication flow
         :param scope: scope of the credentials when using the OIDC Resource Owner Password or Client Credentials authentication flow
+        :param access_token: access token to use when using OIDC and bearer tokens to authenticate
+        :param expires_in: time in seconds when the access token expires
+        :param refresh_token: refresh token to use when using OIDC and bearer tokens to authenticate
         :param index: Index name for document text, embedding and metadata (in Weaviate terminology, this is a "Class" in Weaviate schema).
         :param embedding_dim: The embedding vector size. Default: 768.
         :param content_field: Name of field that might contain the answer and will therefore be passed to the Reader Model (e.g. "full_text").
@@ -148,6 +154,11 @@ class WeaviateDocumentStore(KeywordDocumentStore):
             )
         elif client_secret:
             secret = AuthClientCredentials(client_secret, scope=scope)
+            self.weaviate_client = client.Client(
+                url=weaviate_url, auth_client_secret=secret, timeout_config=timeout_config
+            )
+        elif access_token:
+            secret = AuthBearerToken(access_token, expires_in=expires_in, refresh_token=refresh_token)
             self.weaviate_client = client.Client(
                 url=weaviate_url, auth_client_secret=secret, timeout_config=timeout_config
             )
