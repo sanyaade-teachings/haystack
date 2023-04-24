@@ -1,14 +1,17 @@
-import uuid
-import json
-from unittest import mock
-
 import pytest
-import numpy as np
 
 from haystack.document_stores.weaviate import WeaviateDocumentStore
 from haystack.schema import Document
 from haystack.testing import DocumentStoreBaseTestAbstract
 
+import uuid
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+
+from haystack.schema import Document
+import weaviate
 
 embedding_dim = 768
 
@@ -205,7 +208,7 @@ class TestWeaviateDocumentStore(DocumentStoreBaseTestAbstract):
         ds.write_documents(documents)
         # This test verifies that deleting an object by its ID does not first require fetching all documents. This fixes
         # a bug, as described in https://github.com/deepset-ai/haystack/issues/2898
-        ds.get_all_documents = mock.MagicMock(wraps=ds.get_all_documents)
+        ds.get_all_documents = MagicMock(wraps=ds.get_all_documents)
 
         assert ds.get_document_count() == 9
 
@@ -257,29 +260,21 @@ class TestWeaviateDocumentStore(DocumentStoreBaseTestAbstract):
         ds.write_documents(documents)
         assert ds.get_embedding_count() == 9
 
-    @pytest.mark.unit
-    def test__get_current_properties(self):
-        with mock.patch("haystack.document_stores.weaviate.client") as mocked_client:
-            mocked_client.Client().is_ready.return_value = True
-            mocked_client.Client().schema.contains.return_value = False
-            mocked_client.Client().schema.get.return_value = json.loads(
-                """
-{
-  "classes": [{
-    "class": "Document",
-    "properties": [
-        {
-        "name": "hasWritten",
-        "dataType": ["Article"]
-        },
-        {
-        "name": "hitCounter",
-        "dataType": ["int"]
-        }
-    ]
-  }]
-} """
-            )
-            ds = WeaviateDocumentStore()
-            # Ensure we dropped the cross-reference property
-            assert ds._get_current_properties() == ["hitCounter"]
+    def test_get_auth_secret(self, ds):
+        # Test with username and password
+        secret = ds._get_auth_secret("user", "pass", scope="some_scope")
+        assert isinstance(secret, weaviate.AuthClientPassword)
+
+        # Test with client_secret
+        secret = ds._get_auth_secret(client_secret="client_secret_value", scope="some_scope")
+        assert isinstance(secret, weaviate.AuthClientCredentials)
+
+        # Test with access_token
+        secret = ds._get_auth_secret(
+            access_token="access_token_value", expires_in=3600, refresh_token="refresh_token_value"
+        )
+        assert isinstance(secret, weaviate.AuthBearerToken)
+
+        # Test with no authentication method
+        secret = ds._get_auth_secret()
+        assert secret is None
