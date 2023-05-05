@@ -1,17 +1,14 @@
-import pytest
-
-from haystack.document_stores.weaviate import WeaviateDocumentStore
-from haystack.schema import Document
-from haystack.testing import DocumentStoreBaseTestAbstract
-
 import uuid
+from unittest import mock
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-
-from haystack.schema import Document
 import weaviate
+
+from haystack.document_stores.weaviate import WeaviateDocumentStore
+from haystack.schema import Document
+from haystack.testing import DocumentStoreBaseTestAbstract
 
 embedding_dim = 768
 
@@ -278,3 +275,30 @@ class TestWeaviateDocumentStore(DocumentStoreBaseTestAbstract):
         # Test with no authentication method
         secret = ds._get_auth_secret()
         assert secret is None
+
+    @pytest.mark.unit
+    def test__get_current_properties(self):
+        with mock.patch("haystack.document_stores.weaviate.client") as mocked_client:
+            mocked_client.Client().is_ready.return_value = True
+            mocked_client.Client().schema.contains.return_value = False
+            mocked_client.Client().schema.get.return_value = json.loads(
+                """
+                {
+                "classes": [{
+                    "class": "Document",
+                    "properties": [
+                        {
+                        "name": "hasWritten",
+                        "dataType": ["Article"]
+                        },
+                        {
+                        "name": "hitCounter",
+                        "dataType": ["int"]
+                        }
+                    ]
+                }]
+                } """
+            )
+            ds = WeaviateDocumentStore()
+            # Ensure we dropped the cross-reference property
+            assert ds._get_current_properties() == ["hitCounter"]
