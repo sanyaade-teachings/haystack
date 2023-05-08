@@ -1,11 +1,10 @@
 import os
-from typing import Dict, List, Union, Optional
+from typing import Dict, List, Union, Optional, Any
 import json
 import logging
 
 import requests
 import requests_cache
-import sseclient
 from tokenizers import Tokenizer, Encoding
 
 from haystack.errors import AnthropicError, AnthropicRateLimitError, AnthropicUnauthorizedError
@@ -115,27 +114,51 @@ class AnthropicClaudeInvocationLayer(PromptModelInvocationLayer):
             "stream": stream,
             "stop_sequences": stop_words,
         }
-
+        generated_texts = []
         if not stream:
             res = self._post(data=data)
-            return [res.json()["completion"].strip()]
+            generated_texts = [res.json()["completion"].strip()]
+        else:
+            res = self._post(data=data, stream=True)
+            handler: TokenStreamingHandler = kwargs_with_defaults.pop("stream_handler", DefaultTokenStreamingHandler())
+            generated_texts = self._process_streaming_response(res, handler, stop_words=stop_words)
+        return generated_texts
 
-        res = self._post(data=data, stream=True)
-        handler: TokenStreamingHandler = kwargs_with_defaults.pop("stream_handler", DefaultTokenStreamingHandler())
-        client = sseclient.SSEClient(res)
-        tokens = ""
-        try:
-            for event in client.events():
-                if event.data == TokenStreamingHandler.DONE_MARKER:
-                    continue
-                ed = json.loads(event.data)
-                # Anthropic streamed response always includes the whole
-                # string that has been streamed until that point, so
-                # we can just store the last received event
-                tokens = handler(ed["completion"])
-        finally:
-            client.close()
-        return [tokens.strip()]  # return a list of strings just like non-streaming
+    def _process_streaming_response(self, response, stream_handler: TokenStreamingHandler, stop_words=None):
+        tokens: List[str] = []
+        for byte_payload in response.iter_lines():
+            # Skip line
+            if byte_payload == b"\n":
+                continue
+
+            payload = byte_payload.decode("utf-8")
+            if payload.startswith("data:"):
+                # Decode payload
+                payload = payload.lstrip("data:").strip()
+                if payload != TokenStreamingHandler.DONE_MARKER:
+                    json_payload = json.loads(payload)
+                    # JSON event payload looks like this, see Anthropic docs for details:
+                    # {'completion': ' Here are three', 'exception': None, 'log_id': 'cf793f50e8230e97fce08c1bba9ec85a',
+                    # 'model': 'claude-v1', 'stop': None, 'stop_reason': None, 'truncated': False}
+
+                    token: str = self._extract_token(json_payload)
+                    if token is not None:
+                        prev_token = tokens[-1] if tokens else ""
+                        if prev_token:
+                            slice_index = token.rfind(prev_token)
+                            if slice_index != -1:
+                                last_char_index = slice_index + len(prev_token)
+                                new_tokens = token[last_char_index:]
+                                tokens.append(stream_handler(new_tokens, event_data=json_payload))
+                        else:
+                            # First token
+                            tokens.append(stream_handler(token, event_data=json_payload))
+        return ["".join(tokens)]  # return a list of strings just like non-streaming
+
+    def _extract_token(self, event_data: Dict[str, Any]):
+        # extract token from event data unless we have a stop reason or we encountered stop token
+        received_all_tokens = event_data["stop_reason"] is not None or event_data["stop"] is not None
+        return event_data["completion"] if not received_all_tokens else None
 
     def _ensure_token_limit(self, prompt: Union[str, List[Dict[str, str]]]) -> Union[str, List[Dict[str, str]]]:
         """Make sure the length of the prompt and answer is within the max tokens limit of the model.
