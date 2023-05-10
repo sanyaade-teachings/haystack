@@ -2,20 +2,33 @@ from collections import defaultdict
 import copy
 import logging
 import re
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
 import yaml
+import tenacity
+import prompthub
+from requests import HTTPError, RequestException, JSONDecodeError
 
 from haystack.nodes.base import BaseComponent
-
+from haystack.environment import (
+    HAYSTACK_REMOTE_API_TIMEOUT_SEC,
+    HAYSTACK_REMOTE_API_BACKOFF_SEC,
+    HAYSTACK_REMOTE_API_MAX_RETRIES,
+)
 from haystack.schema import Document, MultiLabel
 from haystack.telemetry import send_event
 from haystack.nodes.prompt.shapers import BaseOutputParser
 from haystack.nodes.prompt.prompt_model import PromptModel
-from haystack.nodes.prompt.prompt_template import PromptTemplate, get_predefined_prompt_templates
+from haystack.nodes.prompt.prompt_template import PromptTemplate
 
 logger = logging.getLogger(__name__)
+
+PROMPTHUB_TIMEOUT = float(os.environ.get(HAYSTACK_REMOTE_API_TIMEOUT_SEC, 30.0))
+PROMPTHUB_BACKOFF = float(os.environ.get(HAYSTACK_REMOTE_API_BACKOFF_SEC, 10.0))
+PROMPTHUB_MAX_RETRIES = int(os.environ.get(HAYSTACK_REMOTE_API_MAX_RETRIES, 5))
 
 
 class PromptNode(BaseComponent):
@@ -97,23 +110,14 @@ class PromptNode(BaseComponent):
             },
         )
         super().__init__()
-        self.prompt_templates: Dict[str, PromptTemplate] = {pt.name: pt for pt in get_predefined_prompt_templates()}  # type: ignore
-        self.default_prompt_template: Union[str, PromptTemplate, None] = default_prompt_template
+        self.default_prompt_template = default_prompt_template
         self.output_variable: Optional[str] = output_variable
         self.model_name_or_path: Union[str, PromptModel] = model_name_or_path
         self.prompt_model: PromptModel
         self.stop_words: Optional[List[str]] = stop_words
         self.top_k: int = top_k
         self.debug = debug
-
-        if isinstance(self.default_prompt_template, str) and not self.is_supported_template(
-            self.default_prompt_template
-        ):
-            raise ValueError(
-                f"Prompt template {self.default_prompt_template} is not supported. "
-                f"Select one of: {self.get_prompt_template_names()} "
-                f"or register a new prompt template first using the add_prompt_template() method."
-            )
+        self._prompt_templates_cache: Dict[str, PromptTemplate] = {}
 
         if isinstance(model_name_or_path, str):
             self.prompt_model = PromptModel(
@@ -144,7 +148,7 @@ class PromptNode(BaseComponent):
             kwargs.pop("prompt_template")
             return self.prompt(prompt_template, *args, **kwargs)
         else:
-            return self.prompt(self.default_prompt_template, *args, **kwargs)
+            return self.prompt(self._default_prompt_template, *args, **kwargs)
 
     def prompt(self, prompt_template: Optional[Union[str, PromptTemplate]], *args, **kwargs) -> List[Any]:
         """
@@ -187,65 +191,56 @@ class PromptNode(BaseComponent):
                 results.extend(output)
         return results
 
-    def add_prompt_template(self, prompt_template: PromptTemplate) -> None:
-        """
-        Adds a prompt template to the list of supported prompt templates.
-        :param prompt_template: The PromptTemplate object to be added.
-        :return: None
-        """
-        if prompt_template.name in self.prompt_templates:
-            raise ValueError(
-                f"Prompt template {prompt_template.name} already exists. "
-                f"Select a different name for this prompt template."
-            )
+    @property
+    def default_prompt_template(self):
+        return self._default_prompt_template
 
-        self.prompt_templates[prompt_template.name] = prompt_template  # type: ignore
-
-    def remove_prompt_template(self, prompt_template: str) -> PromptTemplate:
-        """
-        Removes a prompt template from the list of supported prompt templates.
-        :param prompt_template: Name of the prompt template to be removed.
-        :return: PromptTemplate object that was removed.
-        """
-        if prompt_template not in self.prompt_templates:
-            raise ValueError(f"Prompt template {prompt_template} does not exist")
-
-        return self.prompt_templates.pop(prompt_template)
-
-    def set_default_prompt_template(self, prompt_template: Union[str, PromptTemplate]) -> "PromptNode":
+    @default_prompt_template.setter
+    def default_prompt_template(self, prompt_template: Union[str, PromptTemplate, None]):
         """
         Sets the default prompt template for the node.
         :param prompt_template: The prompt template to be set as default.
         :return: The current PromptNode object.
         """
-        if not self.is_supported_template(prompt_template):
-            raise ValueError(f"{prompt_template} not supported, select one of: {self.get_prompt_template_names()}")
+        self._default_prompt_template = self.get_prompt_template(prompt_template)
 
-        self.default_prompt_template = prompt_template
-        return self
+    @tenacity.retry(
+        reraise=True,
+        retry=tenacity.retry_if_exception_type((HTTPError, RequestException, JSONDecodeError)),
+        wait=tenacity.wait_exponential(multiplier=PROMPTHUB_BACKOFF),
+        stop=tenacity.stop_after_attempt(PROMPTHUB_MAX_RETRIES),
+    )
+    def _prompt_template_exists_in_hub(self, name):
+        """
+        Returns True if the prompt exists in the Hub, False otherwise.
 
-    def get_prompt_templates(self) -> List[PromptTemplate]:
+        Might raise HTTPError.
         """
-        Returns the list of supported prompt templates.
-        :return: List of supported prompt templates.
-        """
-        return list(self.prompt_templates.values())
+        try:
+            prompthub.fetch(name, timeout=PROMPTHUB_TIMEOUT)
+            return True
+        except HTTPError as http_error:
+            if http_error.response.status_code != 404:
+                raise http_error
+        return False
 
-    def get_prompt_template_names(self) -> List[str]:
+    @tenacity.retry(
+        reraise=True,
+        retry=tenacity.retry_if_exception_type((HTTPError, RequestException, JSONDecodeError)),
+        wait=tenacity.wait_exponential(multiplier=PROMPTHUB_BACKOFF),
+        stop=tenacity.stop_after_attempt(PROMPTHUB_MAX_RETRIES),
+    )
+    def _get_prompt_template_from_hub(self, name):
         """
-        Returns the list of supported prompt template names.
-        :return: List of supported prompt template names.
+        Looks for the given prompt in the PromptHub if the prompt is not in the local cache.
         """
-        return list(self.prompt_templates.keys())
-
-    def is_supported_template(self, prompt_template: Union[str, PromptTemplate]) -> bool:
-        """
-        Checks if a prompt template is supported.
-        :param prompt_template: The prompt template to be checked.
-        :return: True if the prompt template is supported, False otherwise.
-        """
-        template_name = prompt_template if isinstance(prompt_template, str) else prompt_template.name
-        return template_name in self.prompt_templates
+        try:
+            prompt_data: prompthub.Prompt = prompthub.fetch(name, timeout=PROMPTHUB_TIMEOUT)
+        except HTTPError as http_error:
+            if http_error.response.status_code != 404:
+                raise http_error
+            raise ValueError(f"Prompt template named '{name}' not available in the Prompt Hub.")
+        return PromptTemplate(name=name, prompt_text=prompt_data.text)
 
     def get_prompt_template(self, prompt_template: Union[str, PromptTemplate, None] = None) -> Optional[PromptTemplate]:
         """
@@ -261,31 +256,34 @@ class PromptNode(BaseComponent):
 
             :return: The prompt template object.
         """
-        prompt_template = prompt_template or self.default_prompt_template
+        # None means we're asking for the default prompt template
+        prompt_template = prompt_template or self._default_prompt_template
         if prompt_template is None:
             return None
 
+        # PromptTemplate instances simply go through
         if isinstance(prompt_template, PromptTemplate):
             return prompt_template
 
-        if isinstance(prompt_template, str) and prompt_template in self.prompt_templates:
-            return self.prompt_templates[prompt_template]
+        # If it's the name of a template that was used already
+        if prompt_template in self._prompt_templates_cache:
+            return self._prompt_templates_cache[prompt_template]
+
+        # If it's a path to a YAML file
+        if Path(prompt_template).exists():
+            with open(prompt_template, "r", encoding="utf-8") as yaml_file:
+                prompt_template_parsed = yaml.safe_load(yaml_file.read())
+                if isinstance(prompt_template_parsed, dict):
+                    return PromptTemplate(**prompt_template_parsed)
 
         # if it's not a string or looks like a prompt template name
-        if not isinstance(prompt_template, str) or re.fullmatch(r"[-a-zA-Z0-9_]+", prompt_template):
-            raise ValueError(
-                f"{prompt_template} not supported, select one of: {self.get_prompt_template_names()} or pass a PromptTemplate instance for prompting."
-            )
+        if re.fullmatch(r"[-a-zA-Z0-9_]+", prompt_template):
+            return self._get_prompt_template_from_hub(prompt_template)
 
-        if "prompt_text:" in prompt_template:
-            prompt_template_parsed = yaml.safe_load(prompt_template)
-            if isinstance(prompt_template_parsed, dict):
-                return PromptTemplate(**prompt_template_parsed)
-
-        # it's a prompt_text
+        # Otherwise, it must be a prompt_text
         prompt_text = prompt_template
         output_parser: Optional[BaseOutputParser] = None
-        default_prompt_template = self.get_prompt_template()
+        default_prompt_template = self._default_prompt_template
         if default_prompt_template:
             output_parser = default_prompt_template.output_parser
         return PromptTemplate(name="custom-at-query-time", prompt_text=prompt_text, output_parser=output_parser)
@@ -296,10 +294,10 @@ class PromptNode(BaseComponent):
         :param prompt_template: The name of the prompt template.
         :return: The list of parameters for the prompt template.
         """
-        if not self.is_supported_template(prompt_template):
-            raise ValueError(f"{prompt_template} not supported, select one of: {self.get_prompt_template_names()}")
-
-        return list(self.prompt_templates[prompt_template].prompt_params)
+        template = self.get_prompt_template(prompt_template)
+        if template:
+            return list(template.prompt_params)
+        return []
 
     def run(
         self,
@@ -409,7 +407,7 @@ class PromptNode(BaseComponent):
         for query, docs, invocation_context, prompt_template in zip(
             inputs["queries"], inputs["documents"], inputs["invocation_contexts"], inputs["prompt_templates"]
         ):
-            prompt_template = self.get_prompt_template(self.default_prompt_template)
+            prompt_template = self.get_prompt_template(self._default_prompt_template)
             output_variable = self.output_variable or prompt_template.output_variable or "results"
             results = self.run(
                 query=query, documents=docs, invocation_context=invocation_context, prompt_template=prompt_template

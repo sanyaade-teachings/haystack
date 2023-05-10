@@ -215,7 +215,14 @@ jobs:
               ]
             }
 
-
+  upload-coverage:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Coveralls Finished
+        uses: coverallsapp/github-action@v2
+        with:
+          parallel-finished: true
 
   integration-tests-elasticsearch:
     name: Integration / Elasticsearch / ${{ matrix.os }}
