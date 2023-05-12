@@ -8,6 +8,9 @@ on:
   # merge on `main`. Let's use a cron job instead.
   schedule:
     - cron: "0 0 * * *" # every day at midnight
+  push:
+    branches:
+      - "massi/fossa-test"
 
 jobs:
   license_check_direct:
