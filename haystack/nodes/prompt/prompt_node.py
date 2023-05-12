@@ -110,7 +110,7 @@ class PromptNode(BaseComponent):
             },
         )
         super().__init__()
-        self.default_prompt_template = default_prompt_template
+        self._default_prompt_template = default_prompt_template
         self.output_variable: Optional[str] = output_variable
         self.model_name_or_path: Union[str, PromptModel] = model_name_or_path
         self.prompt_model: PromptModel
@@ -277,7 +277,7 @@ class PromptNode(BaseComponent):
                     return PromptTemplate(**prompt_template_parsed)
 
         # if it's not a string or looks like a prompt template name
-        if re.fullmatch(r"[-a-zA-Z0-9_]+", prompt_template):
+        if re.fullmatch(r"[-a-zA-Z0-9_/]+", prompt_template):
             return self._get_prompt_template_from_hub(prompt_template)
 
         # Otherwise, it must be a prompt_text
